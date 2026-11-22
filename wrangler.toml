@@ -7,12 +7,6 @@ compatibility_date = "2026-11-22"
 directory = "./dist"
 binding = "ASSETS"
 
-# D1数据库，绑定名称DB
-[[d1_databases]]
-binding = "DB"
-database_name = "reodeep_chat_db"
-database_id = "在这里替换成你的D1数据库UUID"
-
 # 自定义域名 reodeep.de5.net
 [custom_domain]
 domain = "reodeep.de5.net"
