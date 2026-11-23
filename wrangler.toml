@@ -7,6 +7,10 @@ compatibility_date = "2026-11-22"
 directory = "./dist"
 binding = "ASSETS"
 
+[[d1_databases]]
+binding = "DB"
+database_id = "aac4f241-97e3-4e1b-99ba-f33151f68b4f"
+
 # 自定义域名 reodeep.de5.net
 [custom_domain]
 domain = "reodeep.de5.net"
