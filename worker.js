@@ -1,98 +1,170 @@
-/**
- * reodeep.de5.net 一体化Worker
- * 功能：
- * 1. 静态页面：Assets返回chat-demo前端
- * 2. /v1/chat/completions 转发DeepSeek
- * 3. /api/save 保存会话到D1
- * 4. /api/load 读取D1会话
- */
-const upstreamUrl = "https://api.deepseek.com/v1/chat/completions";
+// reodeep Worker —— 精简版
+// 功能：注册 / 登录 / 登出 / 对话代理（自动注入 API Key，前端不接触密钥）
+// 无外部 npm 依赖；密码用 Web Crypto PBKDF2 哈希；会话存 D1，Cookie 为 HttpOnly
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type"
-};
+const SESSION_DAY = 7;
+const DEEPSEEK_MODEL = "deepseek-flash";
 
-/**
- * 预检OPTIONS
- */
-async function handleOptions() {
-  return new Response(null, { headers: corsHeaders });
-}
+// ---------- 工具函数 ----------
 
-/**
- * DeepSeek API代理转发
- */
-async function handleProxy(request, env) {
-  const headers = new Headers(request.headers);
-  headers.set("Authorization", `Bearer ${env.DEEPSEEK_API_KEY}`);
-  headers.delete("Origin");
-  headers.delete("Referer");
-  
-  const upstreamRes = await fetch(upstreamUrl, {
-    method: request.method,
-    headers,
-    body: request.body,
-    signal: request.signal
+function getCookie(cookieStr, key) {
+  if (!cookieStr) return null;
+  const map = {};
+  cookieStr.split(';').forEach(item => {
+    const [k, v] = item.trim().split('=');
+    if (k) map[k] = v;
   });
-  
-  const newHeaders = new Headers(upstreamRes.headers);
-  for (const [k, v] of Object.entries(corsHeaders)) {
-    newHeaders.set(k, v);
-  }
-  return new Response(upstreamRes.body, { headers: newHeaders, status: upstreamRes.status });
+  return map[key] || null;
 }
 
-/**
- * POST /api/save 保存会话
- */
-async function handleSaveSession(request, env) {
-  const { sessionId, messages } = await request.json();
-  await env.DB.prepare(`
-    INSERT OR REPLACE INTO sessions (session_id, data, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-  `).bind(sessionId, JSON.stringify(messages)).run();
-  return Response.json({ ok: true });
+function setSessionCookie(sessionId, expireAt) {
+  const d = new Date(expireAt * 1000);
+  return `__Host-session=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Expires=${d.toUTCString()}`;
 }
 
-/**
- * GET /api/load 读取会话
- */
-async function handleLoadSession(request, env, url) {
-  const sessionId = url.searchParams.get("sessionId");
+// PBKDF2 密码哈希（无第三方依赖），返回 "salt:hash"
+async function hashPassword(password) {
+  const enc = new TextEncoder();
+  const salt = crypto.randomUUID();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(salt), iterations: 100000, hash: 'SHA-256' },
+    keyMaterial, 256
+  );
+  const hash = btoa(String.fromCharCode(...new Uint8Array(bits)));
+  return `${salt}:${hash}`;
+}
+
+async function verifyPassword(password, stored) {
+  const [salt, hash] = stored.split(':');
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(salt), iterations: 100000, hash: 'SHA-256' },
+    keyMaterial, 256
+  );
+  const candidate = btoa(String.fromCharCode(...new Uint8Array(bits)));
+  return candidate === hash;
+}
+
+// 鉴权：读 Cookie 里的 session_id，查 D1 得到 user_id
+async function auth(env, cookie) {
+  if (!cookie) return null;
   const row = await env.DB.prepare(`
-    SELECT data FROM sessions WHERE session_id = ?
-  `).bind(sessionId).first();
-  return Response.json({
-    messages: row ? JSON.parse(row.data) : []
-  });
+    SELECT user_id FROM user_sessions
+    WHERE session_id = ? AND expire_at > unixepoch()
+  `).bind(cookie).first();
+  return row ? row.user_id : null;
 }
+
+
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    
-    if (request.method === "OPTIONS") {
-      return handleOptions();
+    const path = url.pathname;
+    const method = request.method;
+    const cookie = getCookie(request.headers.get('Cookie'), '__Host-session');
+
+    // 登录态探测（页面刷新时恢复）
+    if (path === '/api/auth/me' && method === 'GET') {
+      const uid = await auth(env, cookie);
+      if (!uid) return Response.json({ err: "未登录" }, { status: 401 });
+      return Response.json({ ok: true });
     }
-    
-    // AI接口代理
-    if (url.pathname === "/v1/chat/completions") {
-      return handleProxy(request, env);
+
+    // 注册
+    if (path === '/api/auth/register' && method === 'POST') {
+      const { username, password } = await request.json();
+      if (!username || !password) {
+        return Response.json({ err: "账号密码不能为空" }, { status: 400 });
+      }
+      const exists = await env.DB.prepare(`SELECT id FROM users WHERE username = ?`)
+        .bind(username).first();
+      if (exists) {
+        return Response.json({ err: "用户名已存在" }, { status: 400 });
+      }
+      const hash = await hashPassword(password);
+      const ins = await env.DB.prepare(`
+        INSERT INTO users(username, password_hash) VALUES (?, ?)
+      `).bind(username, hash).run();
+
+      const sid = crypto.randomUUID();
+      const exp = Math.floor(Date.now() / 1000) + SESSION_DAY * 86400;
+      await env.DB.prepare(`
+        INSERT INTO user_sessions(session_id, user_id, expire_at) VALUES (?, ?, ?)
+      `).bind(sid, ins.meta.last_row_id, exp).run();
+
+      return Response.json({ ok: true }, {
+        headers: { "Set-Cookie": setSessionCookie(sid, exp) }
+      });
     }
-    
-    // D1保存会话
-    if (url.pathname === "/api/save" && request.method === "POST") {
-      return handleSaveSession(request, env);
+
+    // 登录
+    if (path === '/api/auth/login' && method === 'POST') {
+      const { username, password } = await request.json();
+      const user = await env.DB.prepare(`
+        SELECT id, password_hash FROM users WHERE username = ?
+      `).bind(username).first();
+      if (!user || !(await verifyPassword(password, user.password_hash))) {
+        return Response.json({ err: "账号或密码错误" }, { status: 401 });
+      }
+      const sid = crypto.randomUUID();
+      const exp = Math.floor(Date.now() / 1000) + SESSION_DAY * 86400;
+      await env.DB.prepare(`
+        INSERT INTO user_sessions(session_id, user_id, expire_at) VALUES (?, ?, ?)
+      `).bind(sid, user.id, exp).run();
+
+      return Response.json({ ok: true }, {
+        headers: { "Set-Cookie": setSessionCookie(sid, exp) }
+      });
     }
-    
-    // D1读取会话
-    if (url.pathname === "/api/load" && request.method === "GET") {
-      return handleLoadSession(request, env, url);
+
+    // 登出
+    if (path === '/api/auth/logout' && method === 'POST') {
+      if (cookie) {
+        await env.DB.prepare(`DELETE FROM user_sessions WHERE session_id = ?`)
+          .bind(cookie).run();
+      }
+      return Response.json({ ok: true }, {
+        headers: {
+          "Set-Cookie": `__Host-session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`
+        }
+      });
     }
-    
-    // 其余全部交给Assets返回前端页面
+
+    // 对话代理：鉴权通过后，Worker 自动注入控制台配置的 API Key
+    if (path === '/v1/chat/completions' && method === 'POST') {
+      const uid = await auth(env, cookie);
+      if (!uid) return Response.json({ err: "未登录" }, { status: 401 });
+
+      const body = await request.json();
+      const payload = { ...body, model: DEEPSEEK_MODEL };
+
+      const upstream = await fetch(
+        `${env.DEEPSEEK_BASE_URL || "https://api.deepseek.com"}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${env["DEEPSEEK-API"]}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        }
+      );
+
+      // SSE 流式透传
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: upstream.headers
+      });
+    }
+
+    // 其余路径：返回前端静态页面
     return env.ASSETS.fetch(request);
   }
 };
