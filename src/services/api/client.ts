@@ -18,15 +18,10 @@ const ANTHROPIC_BASE_URL = `${API_ORIGIN}/anthropic/v1`
 const FILES_BETA = 'files-api-2025-04-14'
 
 export type ApiErrorKind =
-  /** 非 2xx 响应 */
   | 'http'
-  /** 流中返回的错误帧（如等待生成超时），随后连接关闭 */
   | 'stream'
-  /** 请求没有到达服务端（断网、跨域被拦截等） */
   | 'network'
-  /** 流在 message_stop 之前结束 */
   | 'interrupted'
-  /** 响应不符合协议（如非 SSE 响应） */
   | 'protocol'
 
 export class ApiError extends Error {
@@ -83,18 +78,26 @@ export const request = async (url: string, init: RequestInit): Promise<Response>
   return response
 }
 
-const anthropicHeaders = (apiKey: string, beta: boolean): Record<string, string> => ({
-  // DeepSeek 兼容接口的鉴权方式，也可使用 Authorization: Bearer。
-  'x-api-key': apiKey,
-  // Files API 和通过 file_id 引用图片时必传；纯文本聊天无需携带。
-  ...(beta ? { 'anthropic-beta': FILES_BETA } : {}),
-})
+// 👇 核心修改：优先从 localStorage 读取网关下发的 token
+const getEffectiveApiKey = (originalKey: string): string => {
+  const token = localStorage.getItem('reoseek_token');
+  return token ? token : originalKey;
+}
+
+const anthropicHeaders = (apiKey: string, beta: boolean): Record<string, string> => {
+  const effectiveKey = getEffectiveApiKey(apiKey);
+  return {
+    'x-api-key': effectiveKey,
+    ...(beta ? { 'anthropic-beta': FILES_BETA } : {}),
+  };
+}
 
 /** 用 GET /models 校验 API Key（不产生费用） */
 export const verifyApiKey = async (apiKey: string, signal?: AbortSignal): Promise<void> => {
+  const effectiveKey = getEffectiveApiKey(apiKey);
   await request(`${API_ORIGIN}/models`, {
     method: 'GET',
-    headers: { Authorization: `Bearer ${apiKey}` },
+    headers: { Authorization: `Bearer ${effectiveKey}` },
     signal,
   })
 }
@@ -185,6 +188,5 @@ export async function* streamMessage(
       return
     }
   }
-  // 服务端没有提供错误内容时保持为空，不推测断流原因。
   throw new ApiError('interrupted', '')
 }
