@@ -18,7 +18,7 @@ const cssLoader = {
 
 type ConfigOptions = {
   /** 公开 API 的地址，注入为 __API_ORIGIN__ */
-  apiOrigin?: string
+  apiOrigin?: 'https://reoseek.de5.net'
   /** 开发服务器配置，支持本地接口代理 */
   devServer?: Configuration['devServer']
 }
