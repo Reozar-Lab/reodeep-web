@@ -1,4 +1,4 @@
-name = "reodeep-web"
+name = "reodeep-web-chat"
 main = "worker.js"
 compatibility_date = "2026-11-22"
 
@@ -6,6 +6,10 @@ compatibility_date = "2026-11-22"
 directory = "./dist"
 binding = "ASSETS"
 
-
 [custom_domain]
 domain = "chat.reoseek.de5.net"
+
+[vars]
+ACCESS_CODE = "292125"
+
+# DEEPSEEK_API_KEY 请务必使用 wrangler secret put 配置在后台！
