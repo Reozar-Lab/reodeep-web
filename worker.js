@@ -2,114 +2,104 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     
-    // 1. 处理跨域预检请求
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, DELETE',
-          'Access-Control-Allow-Headers': '*',
-        }
-      });
-    }
-    
-    // 2. 拦截 API 请求
-    const isApiRequest = url.pathname === '/models' || url.pathname.startsWith('/anthropic/');
-    
-    if (isApiRequest) {
-      
-      // 【假校验】直接放行前端的 /models 测试
-      if (url.pathname === '/models') {
-        return new Response(JSON.stringify({ object: "list", data: [{ id: "deepseek-flash", object: "model" }] }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-        });
-      }
-      
-      // 提取前端带来的 Token
-      const authHeader = request.headers.get('Authorization') || '';
-      const xApiKey = request.headers.get('x-api-key') || '';
-      const token = xApiKey || authHeader.replace('Bearer ', '');
-      
-      // 【严格校验】：验证 Token 是否合法（必须是 Base64 且包含我们的专属盐）
-      let isValidToken = false;
-      if (token) {
-        try {
-          const decoded = atob(token);
-          if (decoded.includes("_reoseek_salt")) {
-            isValidToken = true;
-          }
-        } catch (e) {
-          isValidToken = false;
-        }
-      }
-      
-      if (!isValidToken) {
-        return new Response(JSON.stringify({ error: '未授权，请前往 reoseek.de5.net 获取访问权限' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-        });
-      }
-      
-      // 构建发往 DeepSeek 的请求
-      const newHeaders = new Headers(request.headers);
-      newHeaders.delete('x-api-key');
-      newHeaders.delete('Authorization');
-      newHeaders.set('Authorization', `Bearer ${env.DEEPSEEK_API_KEY}`);
-      newHeaders.set('x-api-key', env.DEEPSEEK_API_KEY);
-      
-      const targetUrl = `https://api.deepseek.com${url.pathname}${url.search}`;
-      const proxyReq = new Request(targetUrl, {
-        method: request.method,
-        headers: newHeaders,
-        body: request.body
-      });
-      
+    // 1. 登录验证接口：验证通过，直接下发真实 API Key！
+    if (url.pathname === '/api/login' && request.method === 'POST') {
       try {
-        const response = await fetch(proxyReq);
-        const newResponse = new Response(response.body, response);
-        newResponse.headers.set('Access-Control-Allow-Origin', '*');
-        return newResponse;
-      } catch (error) {
-        return new Response(JSON.stringify({ error: '代理请求失败' }), { status: 502 });
+        const { password } = await request.json();
+        if (password === env.ACCESS_CODE) {
+          return new Response(JSON.stringify({ success: true, apiKey: env.DEEPSEEK_API_KEY }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response(JSON.stringify({ error: '密码错误' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+      } catch (e) {
+        return new Response('Bad Request', { status: 400 });
       }
     }
     
-    // 3. 静态资源处理与注入
+    // 2. 返回前端资源并注入拦截脚本
     const assetResponse = await env.ASSETS.fetch(request);
     const contentType = assetResponse.headers.get('Content-Type');
     
     if (contentType && contentType.includes('text/html')) {
       let html = await assetResponse.text();
       
-      // 【前端强制驱逐脚本】
+      // 核心注入脚本
       const injectScript = `
         <script>
-          (function() {
-            const urlParams = new URLSearchParams(window.location.search);
-            const token = urlParams.get('token');
+          (async function() {
+            // 检查是否已经通过验证并注入了 Key
+            const isLogged = localStorage.getItem('reoseek_verified');
             
-            if (token) {
-              // 如果 URL 带 token，保存到本地并清理 URL
-              localStorage.setItem('reoseek_token', token);
-              window.history.replaceState({}, document.title, window.location.pathname);
-            } else {
-              // 如果 URL 没带 token，检查本地有没有
-              const localToken = localStorage.getItem('reoseek_token');
-              if (!localToken) {
-                // 本地也没有，直接踢回主域名
-                window.location.href = "https://reoseek.de5.net";
+            if (isLogged === 'true') {
+              return; // 已验证，正常放行，加载官方 UI
+            }
+
+            // 未验证，锁死页面，防止官方 React 初始化
+            document.documentElement.innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100vh;background:#111;color:#f5d78d;font-family:sans-serif;"><h2>正在连接 Reoseek 安全网关...</h2></div>';
+            
+            // 弹窗要求输入密码
+            const pwd = prompt("【Reoseek 安全网关】请输入访问密码：");
+            
+            if (!pwd) {
+              document.documentElement.innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100vh;background:#111;color:#f5d78d;font-family:sans-serif;"><h2>已取消访问</h2></div>';
+              return;
+            }
+
+            try {
+              // 向后端请求真 Key
+              const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: pwd })
+              });
+              
+              if (res.ok) {
+                const data = await res.json();
+                
+                // 🌟 最高黑科技：暴力遍历官方的 localStorage，把里面的 apiKey 强制改成你下发的真 Key
+                for (let i = 0; i < localStorage.length; i++) {
+                  const key = localStorage.key(i);
+                  try {
+                    const val = JSON.parse(localStorage.getItem(key));
+                    if (val && typeof val === 'object') {
+                      // 找到包含 apiKey 属性的对象，强行覆盖
+                      if ('apiKey' in val || 'api_key' in val) {
+                        if ('apiKey' in val) val.apiKey = data.apiKey;
+                        if ('api_key' in val) val.api_key = data.apiKey;
+                        localStorage.setItem(key, JSON.stringify(val));
+                      }
+                    }
+                  } catch (e) {
+                    // 忽略非 JSON 格式的 localStorage
+                  }
+                }
+
+                // 如果官方没有现成配置，我们直接造一个常见的（以防万一）
+                // 官方一般会存一个类似 settings 的键
+                const fallbackSettings = { apiKey: data.apiKey };
+                localStorage.setItem('settings', JSON.stringify(fallbackSettings));
+                localStorage.setItem('chat-demo-settings', JSON.stringify(fallbackSettings));
+                
+                // 标记已通过验证
+                localStorage.setItem('reoseek_verified', 'true');
+                
+                // 刷新页面！此时官方 React 启动，读到了已经被我们篡改的配置，直接开门！
+                location.reload(); 
+              } else {
+                alert("密码错误！");
+                location.reload();
               }
+            } catch (e) {
+              alert("网络请求失败，请刷新重试");
             }
           })();
         </script>
       `;
       
-      if (html.includes('</head>')) {
-        html = html.replace('</head>', `${injectScript}</head>`);
-      } else {
-        html = injectScript + html;
-      }
+      // 将脚本插入到 HTML 最前面，确保它比官方 React 的脚本先执行
+      html = html.replace('<head>', `<head>${injectScript}`);
+      
       const newHeaders = new Headers(assetResponse.headers);
       newHeaders.set('Cache-Control', 'no-cache, no-store, must-revalidate');
       return new Response(html, { status: assetResponse.status, headers: newHeaders });

@@ -17,13 +17,10 @@ const cssLoader = {
 }
 
 type ConfigOptions = {
-  /** 公开 API 的地址，注入为 __API_ORIGIN__ */
   apiOrigin ? : string
-  /** 开发服务器配置，支持本地接口代理 */
   devServer ? : Configuration['devServer']
 }
 
-/** 创建构建配置，支持自定义 API 地址和开发服务器选项 */
 export const createConfig = ({
   apiOrigin = 'https://api.deepseek.com',
   devServer,
@@ -84,7 +81,7 @@ export const createConfig = ({
   devServer: { port: 8090, ...devServer },
 })
 
-// 👇 核心修改点在这里：将 apiOrigin 指向你的 chat 子域名
+// 👇 核心修改点：改回官方域名！
 export default defineConfig(createConfig({
-  apiOrigin: 'https://chat.reoseek.de5.net'
+  apiOrigin: 'https://api.deepseek.com'
 }))
