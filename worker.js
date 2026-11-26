@@ -31,9 +31,21 @@ export default {
       const xApiKey = request.headers.get('x-api-key') || '';
       const token = xApiKey || authHeader.replace('Bearer ', '');
       
-      // 【修复逻辑】：只要有 Token 即可放行
-      if (!token) {
-        return new Response(JSON.stringify({ error: '未授权，请重新输入接入码' }), {
+      // 【严格校验】：验证 Token 是否合法（必须是 Base64 且包含我们的专属盐）
+      let isValidToken = false;
+      if (token) {
+        try {
+          const decoded = atob(token);
+          if (decoded.includes("_reoseek_salt")) {
+            isValidToken = true;
+          }
+        } catch (e) {
+          isValidToken = false;
+        }
+      }
+      
+      if (!isValidToken) {
+        return new Response(JSON.stringify({ error: '未授权，请前往 reoseek.de5.net 获取访问权限' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
         });
@@ -43,14 +55,10 @@ export default {
       const newHeaders = new Headers(request.headers);
       newHeaders.delete('x-api-key');
       newHeaders.delete('Authorization');
-      
-      // 注入真实的 Key
       newHeaders.set('Authorization', `Bearer ${env.DEEPSEEK_API_KEY}`);
       newHeaders.set('x-api-key', env.DEEPSEEK_API_KEY);
       
-      // 目标 URL
       const targetUrl = `https://api.deepseek.com${url.pathname}${url.search}`;
-      
       const proxyReq = new Request(targetUrl, {
         method: request.method,
         headers: newHeaders,
@@ -73,18 +81,30 @@ export default {
     
     if (contentType && contentType.includes('text/html')) {
       let html = await assetResponse.text();
+      
+      // 【前端强制驱逐脚本】
       const injectScript = `
         <script>
           (function() {
             const urlParams = new URLSearchParams(window.location.search);
             const token = urlParams.get('token');
+            
             if (token) {
+              // 如果 URL 带 token，保存到本地并清理 URL
               localStorage.setItem('reoseek_token', token);
               window.history.replaceState({}, document.title, window.location.pathname);
+            } else {
+              // 如果 URL 没带 token，检查本地有没有
+              const localToken = localStorage.getItem('reoseek_token');
+              if (!localToken) {
+                // 本地也没有，直接踢回主域名
+                window.location.href = "https://reoseek.de5.net";
+              }
             }
           })();
         </script>
       `;
+      
       if (html.includes('</head>')) {
         html = html.replace('</head>', `${injectScript}</head>`);
       } else {
